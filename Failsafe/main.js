@@ -3,13 +3,14 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+const os = require('os'); // NOVO: Para descobrir o IP local
 
 const fetch = require('electron-fetch').default;
 
 // --- Constantes ---
 const SHARED_SERVER_DIR = path.join(__dirname, 'shared_server');
-const SHARED_REPLICA_BASE_DIR = path.join(__dirname, 'replicas'); // Pasta base para todas as réplicas
-const CLIENT_REQUEST_TIMEOUT = 5000; // 5 segundos
+const SHARED_REPLICA_BASE_DIR = path.join(__dirname, 'replicas');
+const CLIENT_REQUEST_TIMEOUT = 5000; 
 
 if (!fs.existsSync(SHARED_SERVER_DIR)) fs.mkdirSync(SHARED_SERVER_DIR);
 if (!fs.existsSync(SHARED_REPLICA_BASE_DIR)) fs.mkdirSync(SHARED_REPLICA_BASE_DIR);
@@ -17,10 +18,25 @@ if (!fs.existsSync(SHARED_REPLICA_BASE_DIR)) fs.mkdirSync(SHARED_REPLICA_BASE_DI
 let win;
 let mainServerInstance = null;
 let mainServerSockets = new Set();
+let replicaServerInstances = {}; 
+let replicaServerSockets = {};
 
-// ATUALIZADO: Gerencia múltiplas instâncias de réplica
-let replicaServerInstances = {}; // Ex: { 1: server, 2: server }
-let replicaServerSockets = {};   // Ex: { 1: Set(), 2: Set() }
+// NOVO: Registro de Réplicas Ativas (só o Servidor Principal usa)
+let activeReplicas = new Set();
+
+// NOVO: Função para encontrar o IP da rede local
+function findLocalIp() {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            // Pula endereços não-IPv4 e internos (ex: 127.0.0.1)
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return 'localhost'; // Fallback
+}
 
 
 function createWindow() {
@@ -41,15 +57,14 @@ app.whenReady().then(createWindow);
 
 // --- Lógica do Servidor (Servidor e Réplica) ---
 
-// ATUALIZADO: Lida com 'replicaId'
-ipcMain.on('start-server', (event, { port, role, replicaId }) => {
+ipcMain.on('start-server', async (event, { port, role, replicaId, serverAddress }) => {
   if (role === 'Servidor') {
     if (mainServerInstance) {
         win.webContents.send('update-status', { role: 'Servidor', message: 'Servidor principal já está rodando.', type: 'danger' });
         return;
     }
     console.log('Iniciando Servidor Principal...');
-    mainServerInstance = startServer(port, role, mainServerSockets); // Passa o Set de sockets
+    mainServerInstance = startServer(port, role, mainServerSockets); 
   
   } else if (role === 'Replica') {
     if (replicaServerInstances[replicaId]) {
@@ -57,16 +72,36 @@ ipcMain.on('start-server', (event, { port, role, replicaId }) => {
         return;
     }
     console.log(`Iniciando Réplica ${replicaId}...`);
-    // Cria um Set de sockets para esta réplica
     replicaServerSockets[replicaId] = new Set();
-    replicaServerInstances[replicaId] = startServer(port, role, replicaServerSockets[replicaId], replicaId); // Passa o Set e o ID
+    const replicaInstance = startServer(port, role, replicaServerSockets[replicaId], replicaId);
+    
+    // NOVO: Registro automático
+    if (replicaInstance) {
+        replicaServerInstances[replicaId] = replicaInstance;
+        // Tenta se registrar com o servidor principal
+        try {
+            const localIp = findLocalIp();
+            const myAddress = `http://${localIp}:${port}`;
+            await fetch(`${serverAddress}/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ address: myAddress })
+            });
+            console.log(`Réplica ${replicaId} (${myAddress}) registrada em ${serverAddress}`);
+        } catch (err) {
+            console.error(`Réplica ${replicaId} falhou ao registrar: ${err.message}`);
+            // Envia um erro, mas a réplica continua rodando
+            win.webContents.send('update-status', { role: 'Replica', message: `Rodando, mas falhou ao registrar: ${err.message}`, type: 'warning', replicaId });
+        }
+    }
   }
 });
 
-// ATUALIZADO: Lida com 'replicaId'
-ipcMain.on('stop-server', (event, role, replicaId) => {
+// ATUALIZADO: Lida com 'replicaId' e desregistro
+ipcMain.on('stop-server', async (event, role, replicaId, serverAddress) => {
     let instance = null;
     let sockets = null;
+    let port = null;
     
     if (role === 'Servidor') {
         instance = mainServerInstance;
@@ -74,12 +109,30 @@ ipcMain.on('stop-server', (event, role, replicaId) => {
     } else if (role === 'Replica') {
         instance = replicaServerInstances[replicaId];
         sockets = replicaServerSockets[replicaId];
+        if (instance) {
+            port = instance.address().port; // Pega a porta antes de fechar
+        }
     }
 
     if (instance) {
+        // NOVO: Tenta se desregistrar do servidor principal
+        if (role === 'Replica') {
+            try {
+                const localIp = findLocalIp();
+                const myAddress = `http://${localIp}:${port}`;
+                await fetch(`${serverAddress}/unregister`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: myAddress })
+                });
+                console.log(`Réplica ${replicaId} (${myAddress}) desregistrada.`);
+            } catch (err) {
+                console.error(`Réplica ${replicaId} falhou ao desregistrar: ${err.message}`);
+            }
+        }
+
         if (sockets) {
             for (const socket of sockets) {
-                console.log(`Destruindo socket ativo do ${role} ${replicaId || ''}...`);
                 socket.destroy();
             }
             sockets.clear();
@@ -89,6 +142,7 @@ ipcMain.on('stop-server', (event, role, replicaId) => {
             console.log(`${role} ${replicaId || ''} parado.`);
             if (role === 'Servidor') {
                 mainServerInstance = null;
+                activeReplicas.clear(); // Limpa o registro de réplicas
             } else if (role === 'Replica') {
                 delete replicaServerInstances[replicaId];
                 delete replicaServerSockets[replicaId];
@@ -100,7 +154,7 @@ ipcMain.on('stop-server', (event, role, replicaId) => {
     }
 });
 
-// ATUALIZADO: Retorna o diretório correto para cada réplica
+
 function getDir(role, replicaId = null) {
   if (role === 'Servidor') {
     return SHARED_SERVER_DIR;
@@ -113,17 +167,53 @@ function getDir(role, replicaId = null) {
   }
 }
 
-// ATUALIZADO: Aceita 'sockets' e 'replicaId'
 function startServer(port, role, sockets, replicaId = null) {
   const sharedDir = getDir(role, replicaId);
   
   const server = http.createServer((req, res) => {
     console.log(`[${role} ${replicaId || ''}] Request: ${req.method} ${req.url}`);
+
+    // --- NOVO: Endpoints de Registro (Só para Servidor Principal) ---
+    if (role === 'Servidor') {
+        if (req.method === 'POST' && req.url === '/register') {
+            let body = '';
+            req.on('data', chunk => body += chunk.toString());
+            req.on('end', () => {
+                const { address } = JSON.parse(body);
+                activeReplicas.add(address);
+                console.log('REPLICA REGISTRADA:', address);
+                console.log('LISTA ATUAL:', ...activeReplicas);
+                res.writeHead(200).end();
+            });
+            return;
+        }
+        
+        if (req.method === 'POST' && req.url === '/unregister') {
+            let body = '';
+            req.on('data', chunk => body += chunk.toString());
+            req.on('end', () => {
+                const { address } = JSON.parse(body);
+                activeReplicas.delete(address);
+                console.log('REPLICA DESREGISTRADA:', address);
+                console.log('LISTA ATUAL:', ...activeReplicas);
+                res.writeHead(200).end();
+            });
+            return;
+        }
+
+        if (req.method === 'GET' && req.url === '/replicas') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(Array.from(activeReplicas)));
+            return;
+        }
+    }
+    // --- Fim dos Endpoints de Registro ---
+
     
     // API: Listar Arquivos
     if (req.method === 'GET' && req.url === '/files') {
       fs.readdir(sharedDir, (err, files) => {
-        if (err) { /* ... (erro) ... */ return; }
+        if (err) { /* ... (erro) ... */ res.writeHead(500).end(); return; }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(files));
       });
@@ -132,11 +222,11 @@ function startServer(port, role, sockets, replicaId = null) {
     else if (req.method === 'GET' && req.url.startsWith('/download/')) {
       const filename = decodeURIComponent(req.url.split('/')[2]);
       const filePath = path.join(sharedDir, filename);
-      if (!fs.existsSync(filePath)) { /* ... (404) ... */ return; }
+      if (!fs.existsSync(filePath)) { res.writeHead(404).end(); return; }
       const stat = fs.statSync(filePath);
       const fileSize = stat.size;
       const range = req.headers.range;
-      if (range) { /* ... (lógica 206) ... */ 
+      if (range) { 
         const parts = range.replace(/bytes=/, "").split("-");
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
@@ -144,58 +234,60 @@ function startServer(port, role, sockets, replicaId = null) {
         const file = fs.createReadStream(filePath, { start, end });
         res.writeHead(206, { 'Content-Range': `bytes ${start}-${end}/${fileSize}`, 'Accept-Ranges': 'bytes', 'Content-Length': chunksize, 'Content-Type': 'application/octet-stream' }); 
         file.pipe(res);
-      } else { /* ... (lógica 200) ... */ 
+      } else { 
         res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': 'application/octet-stream' });
         fs.createReadStream(filePath).pipe(res);
       }
     }
     // API: Propagação de Delete
     else if (req.method === 'DELETE' && req.url.startsWith('/files/')) {
-        if (role !== 'Replica') { /* ... (erro) ... */ return; }
+        if (role !== 'Replica') { res.writeHead(403).end(); return; }
         const filename = decodeURIComponent(req.url.split('/')[2]);
         const filePath = path.join(sharedDir, filename);
         fs.unlink(filePath, (err) => {
-            if (err) { /* ... (erro) ... */ } else {
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('Arquivo deletado.');
+            if (err) { res.writeHead(500).end(); } else {
+                res.writeHead(200).end('Arquivo deletado.');
                 win.webContents.send('file-list-updated', { role: 'Replica', replicaId });
             }
         });
     }
     // API: Upload
     else if (req.method === 'POST' && req.url.startsWith('/upload/')) {
-        if (role !== 'Replica') { /* ... (erro) ... */ return; }
+        if (role !== 'Replica') { res.writeHead(403).end(); return; }
         const filename = decodeURIComponent(req.url.split('/')[2]);
         const filePath = path.join(sharedDir, filename);
         const fileStream = fs.createWriteStream(filePath);
         req.pipe(fileStream);
         req.on('end', () => {
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Upload completo.');
+            res.writeHead(200).end('Upload completo.');
             win.webContents.send('file-list-updated', { role: 'Replica', replicaId });
         });
-        req.on('error', () => { /* ... (erro) ... */ });
+        req.on('error', () => { res.writeHead(500).end(); });
     }
     else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Endpoint nao encontrado.');
+      res.writeHead(404).end('Endpoint nao encontrado.');
     }
     
   });
   
-  // Rastreia sockets
   server.on('connection', (socket) => {
     sockets.add(socket);
     socket.on('close', () => { sockets.delete(socket); });
   });
 
-  // ATUALIZADO: Envia o 'replicaId' de volta para a UI
   server.listen(port, () => {
+    let message = `${role} rodando na porta ${port}!`;
+    // NOVO: Expõe o IP do servidor
+    if (role === 'Servidor') {
+        const localIp = findLocalIp();
+        message = `Servidor rodando em: ${localIp}:${port}`;
+    }
+    
     win.webContents.send('update-status', { 
         role: role, 
-        message: `${role} rodando na porta ${port}!`, 
+        message: message, 
         type: 'success',
-        replicaId: replicaId // Envia o ID de volta
+        replicaId: replicaId
     });
   });
   
@@ -206,10 +298,9 @@ function startServer(port, role, sockets, replicaId = null) {
         delete replicaServerInstances[replicaId];
         delete replicaServerSockets[replicaId];
     }
-    // Envia o erro EADDRINUSE de volta para a UI correta
     win.webContents.send('update-status', { 
         role: role, 
-        message: `Erro: ${err.message}`, // Ex: "listen EADDRINUSE..."
+        message: `Erro: ${err.message}`,
         type: 'danger',
         replicaId: replicaId
     });
@@ -237,7 +328,6 @@ ipcMain.on('add-file-to-server', (event) => {
 
 
 // --- Funções Expostas para o Renderer ---
-
 ipcMain.handle('fetch-files', async (event, serverAddress) => {
   // ... (função sem mudanças)
   try {
@@ -251,20 +341,20 @@ ipcMain.handle('fetch-files', async (event, serverAddress) => {
   }
 });
 
-// ATUALIZADO: Pega arquivos do diretório correto da réplica
 ipcMain.handle('get-local-files', (event, role, replicaId) => {
    const dir = getDir(role, replicaId);
    return fs.readdirSync(dir);
 });
 
-// ATUALIZADO: Deleta do diretório correto da réplica
 ipcMain.handle('delete-file', async (event, role, filename, replicaId) => {
     const filePath = path.join(getDir(role, replicaId), filename);
     try {
         fs.unlinkSync(filePath);
         if (role === 'Servidor') {
-            const replicaAddress = "http://localhost:8001"; // TODO: Pegar da UI
-            await fetch(`${replicaAddress}/files/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            // TODO: Esta lógica de push-delete é falha. A réplica deveria puxar.
+            // Mas por enquanto, vamos deixar.
+            // const replicaAddress = "http://localhost:8001"; 
+            // await fetch(`${replicaAddress}/files/${encodeURIComponent(filename)}`, { method: 'DELETE' });
         }
         return { success: true };
     } catch (e) {
@@ -317,22 +407,34 @@ function performDownload(url, savePath, filename, startByte = 0) {
     });
 }
 
-// ATUALIZADO: Lida com a nova lista de 'replicaAddresses'
-ipcMain.on('download-file', async (event, { serverAddress, replicaAddresses, filename }) => {
+// ATUALIZADO: Busca a lista de réplicas do servidor
+ipcMain.on('download-file', async (event, { serverAddress, filename }) => {
     
-    // Lista de servidores para tentar
+    // 1. Define o servidor principal
     const servers = [
         { name: 'Servidor Principal', url: `${serverAddress}/download/${encodeURIComponent(filename)}` },
-        // Adiciona todas as réplicas da UI
-        ...replicaAddresses.map((addr, i) => ({
-            name: `Réplica 0${i + 1}`,
-            url: `${addr}/download/${encodeURIComponent(filename)}`
-        }))
     ];
     
+    // 2. Tenta buscar a lista de réplicas do servidor
+    try {
+        const response = await fetch(`${serverAddress}/replicas`);
+        if (response.ok) {
+            const replicaAddrs = await response.json();
+            replicaAddrs.forEach((addr, i) => {
+                servers.push({
+                    name: `Réplica 0${i + 1}`,
+                    url: `${addr}/download/${encodeURIComponent(filename)}`
+                });
+            });
+        }
+        console.log('Lista de failover obtida:', servers.map(s => s.name));
+    } catch (err) {
+        console.warn(`Não foi possível buscar a lista de réplicas: ${err.message}`);
+    }
+    
+    // O resto da lógica de failover (passos 3, 4, 5) é o mesmo de antes
     const savePath = path.join(app.getPath('downloads'), filename);
     let failedServers = new Set();
-
     win.webContents.send('update-status', { role: 'Cliente', message: `Iniciando download de ${filename}...`, type: 'info' });
 
     while (true) {
@@ -377,36 +479,29 @@ ipcMain.on('download-file', async (event, { serverAddress, replicaAddresses, fil
 
 // --- Lógica de Sincronização ---
 
-// ATUALIZADO: Lida com 'replicaId'
+// Sincronização da Réplica (PULL)
 ipcMain.on('start-replica-sync', async (event, { serverAddress, replicaId }) => {
+    // ... (função sem mudanças)
     try {
         const response = await fetch(`${serverAddress}/files`);
         if (!response.ok) throw new Error(`Servidor respondeu com ${response.status}`);
         const serverFiles = await response.json();
-        
         const replicaDir = getDir('Replica', replicaId);
         const replicaFiles = fs.readdirSync(replicaDir);
-        
         const missingOnReplica = serverFiles.filter(f => !replicaFiles.includes(f));
-        
-        // Envia o sync-start para a réplica correta
         win.webContents.send('sync-start', { files: missingOnReplica, replicaId });
-        
         for (const file of missingOnReplica) {
             console.log(`Réplica ${replicaId} baixando ${file} do servidor...`);
             const fileUrl = `${serverAddress}/download/${encodeURIComponent(file)}`;
-            const savePath = path.join(replicaDir, file); // Salva na pasta correta da réplica
-            
+            const savePath = path.join(replicaDir, file);
             await performDownload(fileUrl, savePath, file, 0); 
             win.webContents.send('file-list-updated', { role: 'Replica', replicaId });
         }
-        
         if (missingOnReplica.length > 0) {
             console.log(`Sincronização PULL da Réplica ${replicaId} concluída.`);
         } else {
             console.log(`Réplica ${replicaId} já estava sincronizada.`);
         }
-
     } catch (e) {
         console.error(`Erro no sync da réplica ${replicaId}:`, e);
         win.webContents.send('update-status', { role: 'Replica', message: `Erro ao sincronizar: ${e.message}`, type: 'danger', replicaId });
@@ -416,7 +511,7 @@ ipcMain.on('start-replica-sync', async (event, { serverAddress, replicaId }) => 
 
 // Sincronização do Servidor (PUSH)
 ipcMain.on('sync-replica', async (event, { serverAddress, replicaAddress }) => {
-    // ... (função sem mudanças, mas agora é menos importante, já que as réplicas fazem PULL)
+    // ... (função sem mudanças)
     win.webContents.send('update-status', { role: 'Servidor', message: `Sincronizando com ${replicaAddress}...`, type: 'info' });
     try {
         const localFiles = fs.readdirSync(SHARED_SERVER_DIR);
@@ -425,7 +520,6 @@ ipcMain.on('sync-replica', async (event, { serverAddress, replicaAddress }) => {
         const remoteFiles = await response.json();
         const missingOnReplica = localFiles.filter(f => !remoteFiles.includes(f));
         const missingOnServer = remoteFiles.filter(f => !localFiles.includes(f));
-// UPAR (Push)
         for (const file of missingOnReplica) {
             console.log(`Servidor upando ${file} para a réplica...`);
             const filePath = path.join(SHARED_SERVER_DIR, file);
@@ -433,7 +527,6 @@ ipcMain.on('sync-replica', async (event, { serverAddress, replicaAddress }) => {
             const uploadResponse = await fetch(`${replicaAddress}/upload/${encodeURIComponent(file)}`, { method: 'POST', body: fileStream });
             if (!uploadResponse.ok) throw new Error(`Falha ao upar ${file}`);
         }
-// BAIXAR (Pull)
         for (const file of missingOnServer) {
              console.log(`Servidor baixando ${file} da réplica...`);
              const fileUrl = `${replicaAddress}/download/${encodeURIComponent(file)}`;

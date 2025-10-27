@@ -3,12 +3,13 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Funções de controle (Iniciar/Parar)
-  // 'replicaId' é opcional, usado apenas para réplicas
   startServer: (options) => ipcRenderer.send('start-server', options),
-  stopServer: (role, replicaId) => ipcRenderer.send('stop-server', role, replicaId),
+  // ATUALIZADO: Passa 'serverAddress' ao parar a réplica
+  stopServer: (role, replicaId, serverAddress) => ipcRenderer.send('stop-server', role, replicaId, serverAddress),
 
   // Funções do Cliente
   fetchFiles: (serverAddress) => ipcRenderer.invoke('fetch-files', serverAddress),
+  // ATUALIZADO: Não precisa mais de 'replicaAddresses'
   downloadFile: (options) => ipcRenderer.send('download-file', options),
   
   // Funções do Servidor
@@ -21,7 +22,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startReplicaSync: (options) => ipcRenderer.send('start-replica-sync', options),
   
   // Callbacks de Status
-  // 'args' agora inclui o replicaId quando aplicável
   onUpdateStatus: (callback) => ipcRenderer.on('update-status', (e, ...args) => callback(...args)),
   onFileProgress: (callback) => ipcRenderer.on('file-progress', (e, ...args) => callback(...args)),
   onFileListUpdated: (callback) => ipcRenderer.on('file-list-updated', (e, ...args) => callback(...args)),
