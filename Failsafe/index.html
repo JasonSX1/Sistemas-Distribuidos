@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Seminário SD - Tema 08</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .file-list-item { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 0.25rem; margin-bottom: 5px; }
+        .file-list-container { max-height: 200px; overflow-y: auto; border: 1px solid #eee; padding: 10px; border-radius: 5px; }
+        .progress-container { display: flex; align-items: center; gap: 10px; }
+        .progress-text { font-size: 0.9rem; font-weight: 500; min-width: 120px; text-align: right; }
+        .sync-progress-text { font-size: 0.8rem; }
+    </style>
+</head>
+<body class="container pt-4">
+
+    <ul class="nav nav-tabs" id="modeTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="client-tab" data-bs-toggle="tab" data-bs-target="#client-panel" type="button" role="tab">Cliente</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="server-tab" data-bs-toggle="tab" data-bs-target="#server-panel" type="button" role="tab">Servidor Principal</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="replica-1-tab" data-bs-toggle="tab" data-bs-target="#replica-panel-1" type="button" role="tab">Réplica 01</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="replica-2-tab" data-bs-toggle="tab" data-bs-target="#replica-panel-2" type="button" role="tab">Réplica 02</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="replica-3-tab" data-bs-toggle="tab" data-bs-target="#replica-panel-3" type="button" role="tab">Réplica 03</button>
+        </li>
+    </ul>
+
+    <div class="tab-content" id="modeTabContent">
+
+        <div class="tab-pane fade show active" id="client-panel" role="tabpanel">
+            <div class="row p-3">
+                <div class="col-md-6">
+                    <h4>Conectar ao Servidor</h4>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Servidor:</span>
+                        <input type="text" id="client-server-address" class="form-control" value="http://localhost:8000">
+                        <button class="btn btn-primary" id="client-connect-btn">Conectar</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Réplicas (separar por vírgula):</span>
+                        <input type="text" id="client-replicas-list" class="form-control" value="http://localhost:8001,http://localhost:8002,http://localhost:8003">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <h4>Arquivos Disponíveis</h4>
+                    <div id="client-file-list" class="list-group file-list-container">
+                        </div>
+                </div>
+            </div>
+            <hr>
+            <h4>Status do Download</h4>
+            <div id="client-status" class="alert alert-info">Aguardando...</div>
+            
+            <div class="progress-container">
+                <div class="progress" role="progressbar" style="height: 22px; width: 100%;">
+                    <div id="client-progress-bar" class="progress-bar" style="width: 0%"></div>
+                </div>
+                <span id="client-progress-text" class="progress-text">0% (0 B/s)</span>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="server-panel" role="tabpanel">
+            <div class="row p-3">
+                <div class="col-md-6">
+                    <h4>Configuração do Servidor</h4>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Rodar na Porta:</span>
+                        <input type="number" id="server-port" class="form-control" value="8000" disabled>
+                        <button class="btn btn-success" id="server-start-btn">Iniciar Servidor</button>
+                        <button class="btn btn-danger" id="server-stop-btn" style="display: none;">Parar Servidor</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Endereço da Réplica (para Push):</span>
+                        <input type="text" id="server-replica-address" class="form-control" value="http://localhost:8001">
+                    </div>
+                    <button class="btn btn-warning" id="server-sync-btn">Sincronizar (Forçar Push)</button>
+                    <button class="btn btn-outline-primary" id="server-add-file-btn">Adicionar Arquivo Local</button>
+                </div>
+                <div class="col-md-6">
+                    <h4>Gerenciador de Arquivos (Servidor)</h4>
+                    <div id="server-file-list" class="file-list-container"></div>
+                    <small>Adicione ou remova arquivos na pasta 'shared_server'</small>
+                </div>
+            </div>
+            <hr>
+            <h4>Status</h4>
+            <div id="server-status" class="alert alert-info">Servidor parado.</div>
+        </div>
+
+        <div class="tab-pane fade" id="replica-panel-1" role="tabpanel">
+            <div class="row p-3">
+                <div class="col-md-6">
+                    <h4>Configuração (Réplica 01)</h4>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Rodar na Porta:</span>
+                        <input type="number" id="replica-port-1" class="form-control" value="8001" disabled>
+                        <button class="btn btn-success" id="replica-start-btn-1">Iniciar Réplica</button>
+                        <button class="btn btn-danger" id="replica-stop-btn-1" style="display: none;">Parar Réplica</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Endereço do Servidor:</span>
+                        <input type="text" id="replica-server-address-1" class="form-control" value="http://localhost:8000">
+                    </div>
+                    <h4>Arquivos Locais (Réplica 01)</h4>
+                    <div id="replica-file-list-1" class="file-list-container"></div>
+                </div>
+                <div class="col-md-6">
+                    <h4>Status da Sincronização (Pull)</h4>
+                    <div id="replica-sync-status-1"><small>A réplica irá sincronizar ao ser iniciada.</small></div>
+                </div>
+            </div>
+            <hr>
+            <h4>Status</h4>
+            <div id="replica-status-1" class="alert alert-info">Réplica parada.</div>
+        </div>
+        
+        <div class="tab-pane fade" id="replica-panel-2" role="tabpanel">
+            <div class="row p-3">
+                <div class="col-md-6">
+                    <h4>Configuração (Réplica 02)</h4>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Rodar na Porta:</span>
+                        <input type="number" id="replica-port-2" class="form-control" value="8002" disabled>
+                        <button class="btn btn-success" id="replica-start-btn-2">Iniciar Réplica</button>
+                        <button class="btn btn-danger" id="replica-stop-btn-2" style="display: none;">Parar Réplica</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Endereço do Servidor:</span>
+                        <input type="text" id="replica-server-address-2" class="form-control" value="http://localhost:8000">
+                    </div>
+                    <h4>Arquivos Locais (Réplica 02)</h4>
+                    <div id="replica-file-list-2" class="file-list-container"></div>
+                </div>
+                <div class="col-md-6">
+                    <h4>Status da Sincronização (Pull)</h4>
+                    <div id="replica-sync-status-2"><small>A réplica irá sincronizar ao ser iniciada.</small></div>
+                </div>
+            </div>
+            <hr>
+            <h4>Status</h4>
+            <div id="replica-status-2" class="alert alert-info">Réplica parada.</div>
+        </div>
+
+        <div class="tab-pane fade" id="replica-panel-3" role="tabpanel">
+             <div class="row p-3">
+                <div class="col-md-6">
+                    <h4>Configuração (Réplica 03)</h4>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Rodar na Porta:</span>
+                        <input type="number" id="replica-port-3" class="form-control" value="8003" disabled>
+                        <button class="btn btn-success" id="replica-start-btn-3">Iniciar Réplica</button>
+                        <button class="btn btn-danger" id="replica-stop-btn-3" style="display: none;">Parar Réplica</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <span class="input-group-text">Endereço do Servidor:</span>
+                        <input type="text" id="replica-server-address-3" class="form-control" value="http://localhost:8000">
+                    </div>
+                    <h4>Arquivos Locais (Réplica 03)</h4>
+                    <div id="replica-file-list-3" class="file-list-container"></div>
+                </div>
+                <div class="col-md-6">
+                    <h4>Status da Sincronização (Pull)</h4>
+                    <div id="replica-sync-status-3"><small>A réplica irá sincronizar ao ser iniciada.</small></div>
+                </div>
+            </div>
+            <hr>
+            <h4>Status</h4>
+            <div id="replica-status-3" class="alert alert-info">Réplica parada.</div>
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="./renderer.js"></script>
+</body>
+</html>
