@@ -80,13 +80,11 @@ function renderFileList(listId, files, showDeleteButton = false, role = '', repl
             };
             item.appendChild(deleteBtn);
         } else {
-            // ATUALIZADO: Botão de Download do Cliente
             const downloadBtn = document.createElement('button');
             downloadBtn.className = 'btn btn-primary btn-sm';
             downloadBtn.textContent = 'Baixar';
             downloadBtn.onclick = () => {
                  const server = document.getElementById('client-server-address').value;
-                 // Não precisamos mais da lista de réplicas da UI
                  
                  const clientProgressBar = document.getElementById('client-progress-bar');
                  const clientProgressText = document.getElementById('client-progress-text');
@@ -94,7 +92,6 @@ function renderFileList(listId, files, showDeleteButton = false, role = '', repl
                  clientProgressBar.style.width = '0%';
                  clientProgressText.textContent = '0% (0 B/s)';
                  
-                 // Envia apenas o serverAddress. O main.js vai descobrir as réplicas.
                  window.electronAPI.downloadFile({
                      serverAddress: server,
                      filename: file
@@ -128,7 +125,7 @@ window.electronAPI.onUpdateStatus(({ role, message, type, replicaId }) => {
     updateStatus(role, message, type, replicaId);
 });
 
-// ATUALIZADO: Mostra porcentagem e velocidade no texto EXTERNO
+// Mostra porcentagem e velocidade no texto EXTERNO
 window.electronAPI.onFileProgress(({ filename, percent, speed }) => {
     const formattedSpeed = formatSpeed(speed);
 
@@ -149,7 +146,7 @@ window.electronAPI.onFileProgress(({ filename, percent, speed }) => {
     }
 });
 
-// ATUALIZADO: Cria as barras de progresso na réplica correta
+// Cria as barras de progresso na réplica correta
 window.electronAPI.onSyncStart(({ files, replicaId }) => {
     const syncStatusDiv = document.getElementById(`replica-sync-status-${replicaId}`);
     if (!syncStatusDiv) return;
@@ -166,11 +163,10 @@ window.electronAPI.onSyncStart(({ files, replicaId }) => {
         
         fileProgress.innerHTML = `
             <div class="d-flex justify-content-between">
-                <small>${file}</small>
-                <small class="sync-progress-text" id="sync-text-${file}">0% (0 B/s)</small>
+                <small>${file.name}</small> <small class="sync-progress-text" id="sync-text-${file.name}">0% (0 B/s)</small>
             </div>
             <div class="progress" role="progressbar" style="height: 10px;">
-                <div class="progress-bar" id="sync-progress-${file}" style="width: 0%;"></div>
+                <div class="progress-bar" id="sync-progress-${file.name}" style="width: 0%;"></div>
             </div>
         `;
         syncStatusDiv.appendChild(fileProgress);
@@ -221,29 +217,37 @@ document.getElementById('server-sync-btn').addEventListener('click', () => {
 
 // ATUALIZADO: Listeners para as 3 Réplicas
 [1, 2, 3].forEach(id => {
+    
+    // Função helper para disparar o Sync (Pull)
+    const triggerSync = () => {
+        const serverAddress = document.getElementById(`replica-server-address-${id}`).value; 
+        window.electronAPI.startReplicaSync({ serverAddress, replicaId: id });
+    };
+
     // Botão Iniciar Réplica
     document.getElementById(`replica-start-btn-${id}`).addEventListener('click', () => {
         const port = parseInt(document.getElementById(`replica-port-${id}`).value, 10);
-        // Pega o endereço do servidor para se registrar
         const serverAddress = document.getElementById(`replica-server-address-${id}`).value; 
         
         window.electronAPI.startServer({ 
             port, 
             role: 'Replica', 
             replicaId: id, 
-            serverAddress: serverAddress // Envia para o main.js
+            serverAddress: serverAddress
         });
         
         setTimeout(() => refreshLocalFiles('Replica', id), 500); 
-        
-        // O Sync (Pull) também precisa do endereço do servidor
-        window.electronAPI.startReplicaSync({ serverAddress, replicaId: id });
+        triggerSync(); // Sincroniza ao iniciar
     });
 
     // Botão Parar Réplica
     document.getElementById(`replica-stop-btn-${id}`).addEventListener('click', () => {
-        // Pega o endereço do servidor para se desregistrar
         const serverAddress = document.getElementById(`replica-server-address-${id}`).value; 
         window.electronAPI.stopServer('Replica', id, serverAddress);
+    });
+
+    // NOVO: Botão Sincronizar Agora (Pull)
+    document.getElementById(`replica-sync-btn-${id}`).addEventListener('click', () => {
+        triggerSync(); // Sincroniza manualmente
     });
 });
